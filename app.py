@@ -1,16 +1,15 @@
 # app.py
 # Integrated Financial Performance & Governance Dashboard
-# Combines:
-# 1) Business_Financial_KPI_Dashboard_Template.xlsx (KPI Template / ledger driven)
-# 2) SDE & SOE Graph (2).xlsx (SDE/SOE/CDOE year-wise trends + governance)
+# + Management "Screenshot-style" One-Page Dashboard (for presentation)
 #
 # Run:
-#   pip install streamlit pandas openpyxl plotly
+#   pip install -r requirements.txt
 #   streamlit run app.py
 
+from __future__ import annotations
+
 import os
-import re
-from datetime import datetime, date
+from pathlib import Path
 from calendar import monthrange
 
 import numpy as np
@@ -19,31 +18,125 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+
 # -----------------------------
-# CONFIG
+# PAGE CONFIG
 # -----------------------------
 st.set_page_config(
     page_title="Integrated Financial Performance & Governance Dashboard",
     layout="wide",
 )
 
-DEFAULT_KPI_PATH = r"/mnt/data/Business_Financial_KPI_Dashboard_Template.xlsx"
-DEFAULT_SDE_PATH = r"/mnt/data/SDE & SOE Graph (2).xlsx"
+BASE_DIR = Path(__file__).parent
 
-MODEL_MAP_IMG_PATHS = [
-    r"/mnt/data/6235b073-759e-4de2-bf1f-dea0a0250523.png",  # overview/model map screenshot
-    r"/mnt/data/59153642-a6f9-40fd-b370-41ae5a98bf11.png",
-    r"/mnt/data/a8d0c9a7-19eb-40db-b2cc-1d5f628f6f95.png",
+# Put your model-map image inside repo, e.g. ./assets/model_map.png
+ASSETS_DIR = BASE_DIR / "assets"
+MODEL_MAP_CANDIDATES = [
+    ASSETS_DIR / "model_map.png",
+    ASSETS_DIR / "overview.png",
+    ASSETS_DIR / "model.png",
 ]
 
 INR_SYMBOL = "₹"
 
 
 # -----------------------------
+# GLOBAL CSS (Management look)
+# -----------------------------
+st.markdown(
+    """
+<style>
+/* Reduce top padding */
+.block-container { padding-top: 1rem !important; }
+
+/* Hide Streamlit footer */
+footer { visibility: hidden; }
+
+/* Management title bar */
+.mgmt-title {
+    background: linear-gradient(180deg, #0b2d56 0%, #0a2a52 55%, #082545 100%);
+    border-radius: 16px;
+    padding: 22px 24px;
+    color: white;
+    font-weight: 900;
+    font-size: 34px;
+    letter-spacing: 0.2px;
+    text-align: center;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+    margin-top: 6px;
+    margin-bottom: 16px;
+}
+
+/* KPI tile row */
+.kpi-tile {
+    border-radius: 14px;
+    padding: 16px 14px;
+    color: #fff;
+    font-weight: 800;
+    text-align: center;
+    box-shadow: 0 10px 22px rgba(15, 23, 42, 0.10);
+}
+.kpi-label { font-size: 15px; opacity: 0.95; }
+.kpi-value { font-size: 20px; margin-top: 6px; }
+
+/* Section header bar like screenshot */
+.section-header {
+    background: #0b2d56;
+    color: white;
+    padding: 12px 14px;
+    border-radius: 12px 12px 0 0;
+    font-weight: 900;
+    font-size: 18px;
+}
+
+/* Panel container */
+.panel {
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #fff;
+    box-shadow: 0 10px 22px rgba(15,23,42,0.06);
+    overflow: hidden;
+    margin-bottom: 16px;
+}
+.panel-body {
+    padding: 12px 14px 14px 14px;
+}
+
+/* Thin formula strip */
+.formula-strip {
+    background: #154277;
+    color: white;
+    padding: 12px 14px;
+    border-radius: 14px;
+    font-weight: 900;
+    text-align: center;
+    margin-top: 14px;
+    margin-bottom: 16px;
+    box-shadow: 0 10px 22px rgba(15,23,42,0.10);
+}
+
+/* Control strip container */
+.control-strip {
+    border: 1px solid #e5e7eb;
+    border-radius: 14px;
+    background: #fbfbfd;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+}
+
+/* Small helper text */
+.small-note { color: #6b7280; font-size: 12px; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+
+# -----------------------------
 # HELPERS
 # -----------------------------
-def inr(x):
-    """Format INR with commas; no truncation."""
+def inr_full(x) -> str:
+    """Full INR (no L/Cr truncation)."""
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return "—"
     try:
@@ -55,11 +148,31 @@ def inr(x):
     return f"{sign}{INR_SYMBOL}{x:,.0f}"
 
 
-def pct(x, digits=1):
+def inr_compact(x) -> str:
+    """Compact INR for tiles (L / Cr)."""
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return "—"
     try:
-        return f"{100*float(x):.{digits}f}%"
+        v = float(x)
+    except Exception:
+        return str(x)
+
+    sign = "-" if v < 0 else ""
+    v = abs(v)
+
+    # Lakhs & Crores
+    if v >= 1e7:
+        return f"{sign}{INR_SYMBOL}{v/1e7:.1f} Cr"
+    if v >= 1e5:
+        return f"{sign}{INR_SYMBOL}{v/1e5:.1f} L"
+    return f"{sign}{INR_SYMBOL}{v:,.0f}"
+
+
+def pct(x, digits=1) -> str:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "—"
+    try:
+        return f"{100 * float(x):.{digits}f}%"
     except Exception:
         return "—"
 
@@ -80,7 +193,6 @@ def month_start_end(month_dt: pd.Timestamp):
 
 
 def to_month_ts(x):
-    """Force month-level Timestamp."""
     if isinstance(x, pd.Timestamp):
         return pd.Timestamp(x.year, x.month, 1)
     try:
@@ -90,18 +202,19 @@ def to_month_ts(x):
         return pd.NaT
 
 
+def compute_wc_days(ar, ap, inv, revenue, cogs, days_in_month):
+    dso = safe_div(ar, revenue) * days_in_month if revenue else np.nan
+    dpo = safe_div(ap, abs(cogs)) * days_in_month if cogs else np.nan
+    dio = safe_div(inv, abs(cogs)) * days_in_month if cogs else np.nan
+
+    if np.isnan(dso) and np.isnan(dpo) and np.isnan(dio):
+        return np.nan, np.nan, np.nan, np.nan
+
+    ccc = (0 if np.isnan(dso) else dso) + (0 if np.isnan(dio) else dio) - (0 if np.isnan(dpo) else dpo)
+    return dso, dpo, dio, ccc
+
+
 def rag_from_threshold(value, green_max=None, green_min=None, amber_band=0.1, higher_is_bad=True):
-    """
-    Generic RAG:
-      - higher_is_bad=True + green_max:
-          GREEN if value <= (1-amber_band)*green_max
-          AMBER if within ((1-amber_band)*green_max, green_max]
-          RED   if > green_max
-      - higher_is_bad=False + green_min:
-          GREEN if value >= (1+amber_band)*green_min
-          AMBER if within [green_min, (1+amber_band)*green_min)
-          RED   if < green_min
-    """
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return "AMBER", "Insufficient data (missing/zero denominator)."
 
@@ -123,69 +236,24 @@ def rag_from_threshold(value, green_max=None, green_min=None, amber_band=0.1, hi
         return "GREEN", "Comfortably above minimum."
 
 
-def rag_box(color, text):
-    color_map = {
-        "RED":   ("#b42318", "#ffffff"),
-        "AMBER": ("#b54708", "#ffffff"),
-        "GREEN": ("#067647", "#ffffff"),
-        "BLUE":  ("#175cd3", "#ffffff"),
-        "GRAY":  ("#475467", "#ffffff"),
-    }
-    bg, fg = color_map.get(color, ("#475467", "#ffffff"))
-    st.markdown(
-        f"""
-        <div style="background:{bg};color:{fg};padding:14px 16px;border-radius:10px;
-                    font-weight:700;margin:8px 0;line-height:1.25">
-            {text}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+def rag_text_to_color(rag):
+    # match screenshot vibes
+    if rag == "GREEN":
+        return "#1f7a3a"
+    if rag == "AMBER":
+        return "#b45309"
+    if rag == "RED":
+        return "#b42318"
+    return "#334155"
 
 
-def card(title, value, subtitle=None):
-    st.markdown(
-        f"""
-        <div style="border:1px solid #EAECF0;border-radius:14px;padding:14px 16px;background:#ffffff">
-            <div style="font-size:12px;color:#667085;font-weight:700">{title}</div>
-            <div style="font-size:30px;color:#101828;font-weight:900;margin-top:6px">{value}</div>
-            <div style="font-size:12px;color:#667085;margin-top:6px">{subtitle or ""}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def plot_bar_with_labels(df, x, y, color=None, title=None, yaxis_title=None):
-    fig = px.bar(df, x=x, y=y, color=color, text=y, title=title)
-    fig.update_traces(texttemplate="%{text:,.0f}", textposition="outside", cliponaxis=False)
-    fig.update_layout(
-        height=520,
-        margin=dict(l=20, r=20, t=60, b=40),
-        yaxis_title=yaxis_title,
-        xaxis_title="",
-        legend_title_text="",
-    )
-    return fig
-
-
-def plot_grouped_bar_with_labels(df, x, y, group, title=None, yaxis_title=None):
-    fig = px.bar(df, x=x, y=y, color=group, barmode="group", text=y, title=title)
-    fig.update_traces(texttemplate="%{text:,.0f}", textposition="outside", cliponaxis=False)
-    fig.update_layout(
-        height=560,
-        margin=dict(l=20, r=20, t=60, b=40),
-        yaxis_title=yaxis_title,
-        xaxis_title="",
-        legend_title_text="",
-    )
-    return fig
-
-
-def narrative_block(title, bullets):
-    st.markdown(f"### {title}")
-    for b in bullets:
-        st.markdown(f"- {b}")
+def tile_html(title, value, bg):
+    return f"""
+    <div class="kpi-tile" style="background:{bg};">
+        <div class="kpi-label">{title}</div>
+        <div class="kpi-value">{value}</div>
+    </div>
+    """
 
 
 # -----------------------------
@@ -193,9 +261,7 @@ def narrative_block(title, bullets):
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def load_kpi_template(excel_bytes_or_path):
-    # Transactions is the only sheet we truly need for correct computation
     tx = pd.read_excel(excel_bytes_or_path, sheet_name="Transactions")
-    # Normalize columns
     tx.columns = [str(c).strip() for c in tx.columns]
     required = ["Date", "Entity", "AccountType", "Category", "Counterparty", "Amount", "CashFlag", "IntercompanyFlag"]
     missing = [c for c in required if c not in tx.columns]
@@ -213,7 +279,7 @@ def load_kpi_template(excel_bytes_or_path):
     tx["Amount"] = pd.to_numeric(tx["Amount"], errors="coerce").fillna(0.0)
 
     # Enforce sign convention:
-    # Revenue (+), all other listed types (-)
+    # Revenue (+), all other types (-)
     tx["Amount_norm"] = tx["Amount"].copy()
     is_rev = tx["AccountType"].str.upper().eq("REVENUE")
     tx.loc[is_rev, "Amount_norm"] = tx.loc[is_rev, "Amount"].abs()
@@ -225,21 +291,16 @@ def load_kpi_template(excel_bytes_or_path):
 
 @st.cache_data(show_spinner=False)
 def load_sde_soe_tables(excel_bytes_or_path):
-    # We extract clean tables from specific sheets with merged headers
     def extract_table(sheet_name, header_row_idx):
         raw = pd.read_excel(excel_bytes_or_path, sheet_name=sheet_name, header=None)
         header = raw.iloc[header_row_idx].astype(str).tolist()
         df = raw.iloc[header_row_idx + 1 :].copy()
         df.columns = header
         df = df.dropna(how="all")
-        # Drop fully empty columns
         df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", na=False)]
-        # Strip column names
         df.columns = [str(c).strip().replace("\n", " ") for c in df.columns]
         return df
 
-    # CDOE(26.02.26): header row at 4 (0-index), from your file inspection it starts at row where "Sr. No."
-    # We find it dynamically for safety.
     def find_header_row(sheet_name, needle="Sr. No."):
         raw = pd.read_excel(excel_bytes_or_path, sheet_name=sheet_name, header=None)
         for i in range(len(raw)):
@@ -248,20 +309,20 @@ def load_sde_soe_tables(excel_bytes_or_path):
                 return i
         return None
 
-    # Extract CDOE table
     cd_sheet = "CDOE(26.02.26)"
-    cd_hr = find_header_row(cd_sheet, "Sr. No.")
-    cd = extract_table(cd_sheet, cd_hr)
-
-    # Extract combined table
     comb_sheet = "26.02.26"
+
+    cd_hr = find_header_row(cd_sheet, "Sr. No.")
     comb_hr = find_header_row(comb_sheet, "Sr. No.")
+
+    if cd_hr is None or comb_hr is None:
+        raise ValueError("Could not locate header rows in SDE/SOE file.")
+
+    cd = extract_table(cd_sheet, cd_hr)
     comb = extract_table(comb_sheet, comb_hr)
 
-    # Clean / standardize
     def clean_year(df):
         if "Year" not in df.columns:
-            # try find any column containing 'Year'
             ycol = next((c for c in df.columns if "year" in c.lower()), None)
             if ycol:
                 df = df.rename(columns={ycol: "Year"})
@@ -271,7 +332,6 @@ def load_sde_soe_tables(excel_bytes_or_path):
     cd = clean_year(cd)
     comb = clean_year(comb)
 
-    # Numeric conversions for likely columns
     for df in [cd, comb]:
         for c in df.columns:
             if c.lower() in {"sr. no.", "sr no", "sr.no."}:
@@ -286,13 +346,17 @@ def load_sde_soe_tables(excel_bytes_or_path):
 # -----------------------------
 # KPI COMPUTATION
 # -----------------------------
-def compute_kpi_for_entity_month(tx, entity, month_ts):
+def compute_kpi_for_entity_month(tx, entity, month_ts, eliminate_ic=False):
     ms, me = month_start_end(month_ts)
     days = (me - ms).days + 1
 
-    df = tx[(tx["Entity"] == entity) & (tx["Date"] >= ms) & (tx["Date"] <= me)].copy()
+    df = tx[(tx["Date"] >= ms) & (tx["Date"] <= me)].copy()
+    if entity != "__CONSOLIDATED__":
+        df = df[df["Entity"] == entity].copy()
 
-    # P&L components
+    if eliminate_ic:
+        df = df[~df["IntercompanyFlag"].str.upper().eq("YES")].copy()
+
     def sum_type(t):
         return df.loc[df["AccountType"].str.upper().eq(t.upper()), "Amount_norm"].sum()
 
@@ -306,17 +370,13 @@ def compute_kpi_for_entity_month(tx, entity, month_ts):
     ebitda = gross_profit + opex
     net_profit = ebitda + interest + tax
 
-    # Cash flow (cash only)
     ocf = df.loc[df["CashFlag"].str.upper().eq("CASH"), "Amount_norm"].sum()
 
-    # Intercompany
     ic_sum = df.loc[df["IntercompanyFlag"].str.upper().eq("YES"), "Amount_norm"].sum()
     ic_pct_rev = safe_div(abs(ic_sum), revenue) if revenue != 0 else np.nan
 
-    # Expense ratio (opex + cogs) / revenue
     exp_ratio = safe_div(abs(cogs) + abs(opex), revenue) if revenue != 0 else np.nan
 
-    # Margins
     gross_margin = safe_div(gross_profit, revenue) if revenue != 0 else np.nan
     ebitda_margin = safe_div(ebitda, revenue) if revenue != 0 else np.nan
     net_margin = safe_div(net_profit, revenue) if revenue != 0 else np.nan
@@ -343,27 +403,20 @@ def compute_kpi_for_entity_month(tx, entity, month_ts):
     return out
 
 
-def compute_wc_days(ar, ap, inv, revenue, cogs, days_in_month):
-    dso = safe_div(ar, revenue) * days_in_month if revenue else np.nan
-    dpo = safe_div(ap, abs(cogs)) * days_in_month if cogs else np.nan
-    dio = safe_div(inv, abs(cogs)) * days_in_month if cogs else np.nan
-    ccc = (dso if not np.isnan(dso) else 0) + (dio if not np.isnan(dio) else 0) - (dpo if not np.isnan(dpo) else 0)
-    # If all missing, return nan
-    if np.isnan(dso) and np.isnan(dpo) and np.isnan(dio):
-        ccc = np.nan
-    return dso, dpo, dio, ccc
+def monthly_pnl_table(tx, entity, eliminate_ic=False):
+    df = tx.copy()
+    if entity != "__CONSOLIDATED__":
+        df = df[df["Entity"] == entity].copy()
+    if eliminate_ic:
+        df = df[~df["IntercompanyFlag"].str.upper().eq("YES")].copy()
 
-
-def monthly_pnl_table(tx, entity):
-    # Build Jan-Dec per available months (not fixed to 2026, but you can filter)
-    df = tx[tx["Entity"] == entity].copy()
     months = sorted([m for m in df["Month"].dropna().unique()])
     if not months:
         return pd.DataFrame()
 
     rows = []
     for m in months:
-        k = compute_kpi_for_entity_month(tx, entity, pd.Timestamp(m))
+        k = compute_kpi_for_entity_month(tx, entity, pd.Timestamp(m), eliminate_ic=eliminate_ic)
         rows.append(
             {
                 "Month": pd.Timestamp(m),
@@ -378,809 +431,515 @@ def monthly_pnl_table(tx, entity):
             }
         )
     out = pd.DataFrame(rows).sort_values("Month")
-    out["Month"] = out["Month"].dt.strftime("%b-%Y")
+    out["MonthLabel"] = out["Month"].dt.strftime("%b-%Y")
     return out
 
 
-def sister_concerns_table(tx, month_ts, revenue_by_entity=None):
-    ms, me = month_start_end(month_ts)
-    dfm = tx[(tx["Date"] >= ms) & (tx["Date"] <= me)].copy()
-    ic = dfm[dfm["IntercompanyFlag"].str.upper().eq("YES")].copy()
-    if ic.empty:
-        return pd.DataFrame(columns=["Entity", "Inter-company In/Out", "% of Revenue"])
+# -----------------------------
+# TOP CONTROL STRIP
+# -----------------------------
+st.markdown('<div class="control-strip">', unsafe_allow_html=True)
+c0, c1, c2, c3, c4, c5 = st.columns([1.4, 1.2, 1.2, 1.2, 1.2, 1.0], vertical_alignment="bottom")
 
-    g = ic.groupby("Entity")["Amount_norm"].sum().reset_index()
-    g = g.rename(columns={"Amount_norm": "Inter-company In/Out"})
-    if revenue_by_entity is None:
-        # compute revenue in same month
-        rev = dfm[dfm["AccountType"].str.upper().eq("REVENUE")].groupby("Entity")["Amount_norm"].sum().reset_index()
-        rev = rev.rename(columns={"Amount_norm": "Revenue"})
-        g = g.merge(rev, on="Entity", how="left")
-    else:
-        g = g.merge(revenue_by_entity, on="Entity", how="left")
+with c0:
+    kpi_upload = st.file_uploader("Upload KPI Template (xlsx)", type=["xlsx"], key="kpi_upl_top")
+with c1:
+    sde_upload = st.file_uploader("Upload SDE/SOE file (xlsx)", type=["xlsx"], key="sde_upl_top")
+with c2:
+    view_mode = st.selectbox("View Mode", ["Management View (Presentation)", "Detailed View (Operations)"], index=0)
+with c3:
+    eliminate_ic = st.selectbox("Consolidation Basis", ["Include Intercompany", "Eliminate Intercompany"], index=1)
+    eliminate_ic = (eliminate_ic == "Eliminate Intercompany")
+with c4:
+    revenue_shock = st.slider("Revenue shock %", min_value=-30, max_value=30, value=-5, step=1)
+with c5:
+    cost_increase = st.slider("Cost increase %", min_value=0, max_value=30, value=10, step=1)
 
-    g["% of Revenue"] = g.apply(lambda r: safe_div(abs(r["Inter-company In/Out"]), r.get("Revenue", np.nan)), axis=1)
-    return g
-
-
-def consolidate_month(tx, month_ts, eliminate_ic=True):
-    ms, me = month_start_end(month_ts)
-    df = tx[(tx["Date"] >= ms) & (tx["Date"] <= me)].copy()
-    if eliminate_ic:
-        df = df[~df["IntercompanyFlag"].str.upper().eq("YES")].copy()
-
-    def sum_type(t):
-        return df.loc[df["AccountType"].str.upper().eq(t.upper()), "Amount_norm"].sum()
-
-    revenue = sum_type("Revenue")
-    cogs = sum_type("COGS")
-    opex = sum_type("Opex")
-    interest = sum_type("Interest")
-    tax = sum_type("Tax")
-    gp = revenue + cogs
-    ebitda = gp + opex
-    npf = ebitda + interest + tax
-
-    exp_ratio = safe_div(abs(cogs) + abs(opex), revenue) if revenue != 0 else np.nan
-
-    return {
-        "Revenue": revenue,
-        "COGS": cogs,
-        "Gross Profit": gp,
-        "Opex": opex,
-        "EBITDA": ebitda,
-        "Interest": interest,
-        "Tax": tax,
-        "Net Profit": npf,
-        "Gross Margin %": safe_div(gp, revenue) if revenue != 0 else np.nan,
-        "EBITDA Margin %": safe_div(ebitda, revenue) if revenue != 0 else np.nan,
-        "Net Margin %": safe_div(npf, revenue) if revenue != 0 else np.nan,
-        "Expense Ratio": exp_ratio,
-        "df_month": df,
-    }
+st.markdown('</div>', unsafe_allow_html=True)
 
 
 # -----------------------------
-# TEMPLATE CREATOR (EXCEL)
+# LOAD FILES
 # -----------------------------
-def create_blank_kpi_template_xlsx():
-    # Creates the EXACT sheets user described, with clean tables.
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
+kpi_loaded = False
+sde_loaded = False
+tx = None
+sde_tables = None
 
-    wb = Workbook()
-    wb.remove(wb.active)
-
-    blue = PatternFill("solid", fgColor="D9EAF7")
-    bold = Font(bold=True)
-    center = Alignment(horizontal="left", vertical="center")
-
-    # 1) Inputs
-    ws = wb.create_sheet("Inputs")
-    ws["A1"] = "Business Financial KPI Dashboard – Inputs & Assumptions"
-    ws["A1"].font = Font(bold=True, size=14)
-    ws["A3"] = "Control Panel"
-    ws["A3"].font = Font(bold=True, size=12)
-
-    inputs_rows = [
-        ("Selected Entity", "Entity A"),
-        ("Selected Month (YYYY-MM-01)", "2026-01-01"),
-        ("AR Closing", 0),
-        ("AP Closing", 0),
-        ("Inventory Closing", 0),
-        ("Cash Balance (month-end)", 0),
-        ("Governance Thresholds", ""),
-        ("Max Inter-company % of Revenue", 0.20),
-        ("Min Cash Balance alert", 100000),
-        ("Max Expense Ratio alert", 0.75),
-        ("Min Net Margin alert", 0.10),
-        ("Max CCC (Days) alert", 60),
-        ("SDE/SOE Thresholds", ""),
-        ("SDE/SOE Max Expense Ratio", 0.75),
-        ("SDE/SOE Min Surplus Margin", 0.10),
-        ("SDE/SOE Max Transfer % of Income", 0.35),
-    ]
-    r = 5
-    for k, v in inputs_rows:
-        ws[f"A{r}"] = k
-        ws[f"B{r}"] = v
-        ws[f"B{r}"].fill = blue
-        ws[f"A{r}"].font = bold if ("Threshold" in k or "Governance" in k or "SDE/SOE" in k) else Font(bold=False)
-        ws[f"A{r}"].alignment = center
-        ws[f"B{r}"].alignment = center
-        r += 1
-    ws.column_dimensions["A"].width = 42
-    ws.column_dimensions["B"].width = 26
-
-    # 2) Transactions
-    ws = wb.create_sheet("Transactions")
-    headers = ["Date", "Entity", "AccountType", "Category", "Counterparty", "Amount", "CashFlag", "IntercompanyFlag"]
-    ws.append(headers)
-    for c in range(1, len(headers) + 1):
-        cell = ws.cell(row=1, column=c)
-        cell.font = bold
-        cell.fill = PatternFill("solid", fgColor="EEF2F6")
-    ws.freeze_panes = "A2"
-    ws.column_dimensions["A"].width = 14
-    ws.column_dimensions["B"].width = 12
-    ws.column_dimensions["C"].width = 12
-    ws.column_dimensions["D"].width = 16
-    ws.column_dimensions["E"].width = 16
-    ws.column_dimensions["F"].width = 12
-    ws.column_dimensions["G"].width = 10
-    ws.column_dimensions["H"].width = 16
-
-    # 3) P&L
-    wb.create_sheet("P&L")
-    # 4) CashFlow
-    wb.create_sheet("CashFlow")
-    # 5) SisterConcerns
-    wb.create_sheet("SisterConcerns")
-    # 6) KPI_Dashboard
-    wb.create_sheet("KPI_Dashboard")
-    # Helper
-    wb.create_sheet("P&L_Entity")
-
-    return wb
-
-
-# -----------------------------
-# SIDEBAR – FILE INPUTS + THRESHOLDS
-# -----------------------------
-st.title("Integrated Financial Performance & Governance Dashboard")
-
-with st.sidebar:
-    st.header("Data Sources")
-
-    kpi_upload = st.file_uploader("Upload KPI Template (xlsx)", type=["xlsx"], key="kpi_upl")
-    sde_upload = st.file_uploader("Upload SDE/SOE file (xlsx)", type=["xlsx"], key="sde_upl")
-
-    st.divider()
-    st.header("Controls")
-
-# Load files (uploaded overrides default)
 try:
-    kpi_src = kpi_upload if kpi_upload is not None else DEFAULT_KPI_PATH
-    tx = load_kpi_template(kpi_src)
-    kpi_loaded = True
+    if kpi_upload is None:
+        st.info("Upload KPI Template to activate KPIs (Transactions sheet).")
+    else:
+        tx = load_kpi_template(kpi_upload)
+        kpi_loaded = True
 except Exception as e:
-    tx = None
-    kpi_loaded = False
     st.error(f"KPI template load failed: {e}")
 
 try:
-    sde_src = sde_upload if sde_upload is not None else DEFAULT_SDE_PATH
-    sde_tables = load_sde_soe_tables(sde_src)
-    sde_loaded = True
+    if sde_upload is not None:
+        sde_tables = load_sde_soe_tables(sde_upload)
+        sde_loaded = True
 except Exception as e:
-    sde_tables = None
-    sde_loaded = False
-    st.error(f"SDE/SOE file load failed: {e}")
+    st.warning(f"SDE/SOE file not loaded: {e}")
 
-# -----------------------------------
-# TOP NAV (MORE TABS as requested)
-# -----------------------------------
-top_tabs = st.tabs(
-    [
-        "🏠 Home / Model Map",
-        "📊 KPI Template Dashboard",
-        "🏛 Governance (RAG + Improvements)",
-        "🧾 Consolidation (Group View)",
-        "📈 KPI Charts + Narration",
-        "🎓 SDE/SOE Dashboard",
-        "🧩 SDE/SOE Governance + Notes",
-        "🗂 Data Tables (Both Files)",
-        "⚙️ Tools (Create Template)",
-    ]
-)
 
-# -----------------------------------
-# HOME / MODEL MAP
-# -----------------------------------
-with top_tabs[0]:
-    st.subheader("Overview Picture / Model Map")
-
-    cols = st.columns([2, 1])
-    with cols[0]:
-        shown = False
-        for p in MODEL_MAP_IMG_PATHS:
-            if os.path.exists(p):
-                st.image(p, use_container_width=True)
-                shown = True
-                break
-        if not shown:
-            st.info("Model map image not found in this environment. (Add your screenshot PNG to the project folder and update MODEL_MAP_IMG_PATHS.)")
-
-    with cols[1]:
-        card("KPI Template Loaded", "YES" if kpi_loaded else "NO")
-        card("SDE/SOE Loaded", "YES" if sde_loaded else "NO")
-        st.markdown("---")
-        st.markdown(
-            """
-            **What this dashboard does**
-            - Reads your ledger-style **Transactions** and builds P&L, CashFlow, SisterConcerns, KPIs.
-            - Applies strict **RED / AMBER / GREEN** governance checks with clear actions.
-            - Reads **SDE/SOE/CDOE** year-wise file and produces trend charts + governance notes.
-            - Produces **Consolidation** (all entities) with optional intercompany elimination.
-            """
-        )
-
-# -----------------------------------
-# KPI TEMPLATE DASHBOARD
-# -----------------------------------
+# -----------------------------
+# GLOBAL CONTROLS (Entity / Month / WC)
+# -----------------------------
 if kpi_loaded:
     entities = sorted(tx["Entity"].dropna().unique().tolist())
     months = sorted([m for m in tx["Month"].dropna().unique()])
+    month_labels = [pd.Timestamp(m).strftime("%b-%Y") for m in months]
 else:
-    entities, months = [], []
+    entities = []
+    months = []
+    month_labels = []
 
-with st.sidebar:
-    if kpi_loaded:
-        sel_entity = st.selectbox("Selected Entity", options=entities, index=0)
-        # Show months as "Jan-2026" etc.
-        month_labels = [pd.Timestamp(m).strftime("%b-%Y") for m in months]
-        sel_month_label = st.selectbox("Selected Month", options=month_labels, index=0)
+ctrl_row1 = st.columns([1.2, 1.2, 1, 1, 1], vertical_alignment="bottom")
+with ctrl_row1[0]:
+    entity_opt = ["Consolidated (All Entities)"] + entities if kpi_loaded else ["Consolidated (All Entities)"]
+    sel_entity_label = st.selectbox("Entity", entity_opt, index=0)
+    sel_entity = "__CONSOLIDATED__" if sel_entity_label.startswith("Consolidated") else sel_entity_label
+
+with ctrl_row1[1]:
+    if kpi_loaded and month_labels:
+        sel_month_label = st.selectbox("Month", month_labels, index=len(month_labels) - 1)
         sel_month = pd.Timestamp(months[month_labels.index(sel_month_label)])
     else:
-        sel_entity, sel_month = None, None
+        sel_month = pd.Timestamp.today().replace(day=1)
+        st.selectbox("Month", ["(upload KPI file)"], index=0, disabled=True)
 
-    st.divider()
-    st.subheader("Working Capital Inputs")
-    ar = st.number_input("AR Closing (₹)", min_value=0.0, value=450000.0, step=10000.0, format="%.0f")
-    ap = st.number_input("AP Closing (₹)", min_value=0.0, value=380000.0, step=10000.0, format="%.0f")
-    inv = st.number_input("Inventory Closing (₹)", min_value=0.0, value=250000.0, step=10000.0, format="%.0f")
-    cash_bal = st.number_input("Cash Balance (month-end) (₹)", min_value=0.0, value=0.0, step=10000.0, format="%.0f")
+with ctrl_row1[2]:
+    ar = st.number_input("AR (₹)", min_value=0.0, value=450000.0, step=10000.0, format="%.0f")
+with ctrl_row1[3]:
+    ap = st.number_input("AP (₹)", min_value=0.0, value=380000.0, step=10000.0, format="%.0f")
+with ctrl_row1[4]:
+    inv = st.number_input("Inventory (₹)", min_value=0.0, value=250000.0, step=10000.0, format="%.0f")
 
-    st.divider()
-    st.subheader("Governance Thresholds")
-    max_ic_pct = st.number_input("Max Inter-company % of Revenue", min_value=0.0, max_value=1.0, value=0.20, step=0.01, format="%.2f")
-    min_cash_alert = st.number_input("Min Cash Balance alert (₹)", min_value=0.0, value=100000.0, step=10000.0, format="%.0f")
-    max_exp_ratio = st.number_input("Max Expense Ratio alert", min_value=0.0, max_value=2.0, value=0.75, step=0.01, format="%.2f")
-    min_net_margin = st.number_input("Min Net Margin alert", min_value=-1.0, max_value=1.0, value=0.10, step=0.01, format="%.2f")
-    max_ccc_days = st.number_input("Max CCC (Days) alert", min_value=0.0, value=60.0, step=5.0, format="%.0f")
+ctrl_row2 = st.columns([1.0, 1.0, 1.0, 2.0], vertical_alignment="bottom")
+with ctrl_row2[0]:
+    cash_bal = st.number_input("Cash (₹)", min_value=0.0, value=200000.0, step=10000.0, format="%.0f")
+with ctrl_row2[1]:
+    min_cash_alert = st.number_input("Min Cash Alert (₹)", min_value=0.0, value=100000.0, step=10000.0, format="%.0f")
+with ctrl_row2[2]:
+    max_ccc_days = st.number_input("Max CCC Days", min_value=0.0, value=60.0, step=5.0, format="%.0f")
+with ctrl_row2[3]:
+    with st.expander("Governance thresholds (click to expand)", expanded=False):
+        max_ic_pct = st.number_input("Max Inter-company % of Revenue", min_value=0.0, max_value=1.0, value=0.20, step=0.01, format="%.2f")
+        max_exp_ratio = st.number_input("Max Expense Ratio", min_value=0.0, max_value=2.0, value=0.75, step=0.01, format="%.2f")
+        min_net_margin = st.number_input("Min Net Margin", min_value=-1.0, max_value=1.0, value=0.10, step=0.01, format="%.2f")
 
-# Compute KPI
-if kpi_loaded and sel_entity and sel_month is not None:
-    k = compute_kpi_for_entity_month(tx, sel_entity, sel_month)
+st.markdown('<div class="small-note">Tip: choose <b>Consolidated (All Entities)</b> to show group numbers to management.</div>', unsafe_allow_html=True)
+
+
+# -----------------------------
+# COMPUTE SELECTED KPI
+# -----------------------------
+k = None
+dso = dpo = dio = ccc = np.nan
+if kpi_loaded:
+    k = compute_kpi_for_entity_month(tx, sel_entity, sel_month, eliminate_ic=eliminate_ic)
     dso, dpo, dio, ccc = compute_wc_days(ar, ap, inv, k["Revenue"], k["COGS"], k["days_in_month"])
-else:
-    k = None
-    dso = dpo = dio = ccc = np.nan
 
-with top_tabs[1]:
-    st.subheader("KPI Template Dashboard (Monthly / Ledger-driven)")
 
-    if not kpi_loaded:
-        st.warning("Upload the KPI template file to enable this section.")
-    else:
-        # KPI cards (NO TRUNCATION, FULL ₹ with commas)
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
-        with c1:
-            card("Total Revenue", inr(k["Revenue"]))
-        with c2:
-            card("Operating Expenses (Opex)", inr(abs(k["Opex"])), "Shown as absolute (cost).")
-        with c3:
-            card("Net Profit", inr(k["Net Profit"]))
-        with c4:
-            card("Operating Cash Flow", inr(k["Operating Cash Flow"]))
-        with c5:
-            card("Expense Ratio", pct(k["Expense Ratio"]))
-        with c6:
-            card("Inter-company %", pct(k["Intercompany % of Revenue"]))
+# =============================================================================
+# MANAGEMENT VIEW (Screenshot-style)
+# =============================================================================
+def render_management_view():
+    st.markdown('<div class="mgmt-title">Integrated Financial Performance &amp; Governance Dashboard</div>', unsafe_allow_html=True)
 
-        st.caption("Sign convention enforced: Revenue (+); COGS/Opex/Interest/Tax are negative; Profit is simple addition.")
+    if not kpi_loaded or k is None:
+        st.warning("Upload KPI Template to render the Management View.")
+        return
 
-        # Sub-tabs for KPI template (matches your logic)
-        sub = st.tabs(["Inputs", "Transactions", "P&L", "CashFlow", "SisterConcerns", "KPI Table"])
+    # KPI Tiles row (like screenshot)
+    total_rev = k["Revenue"]
+    total_exp = abs(k["COGS"]) + abs(k["Opex"]) + abs(k["Interest"]) + abs(k["Tax"])
+    net_profit = k["Net Profit"]
+    cash_pos = cash_bal
 
-        # Inputs
-        with sub[0]:
-            st.markdown("**Purpose:** Single control panel + assumptions (editable inputs are in sidebar).")
-            df_inputs = pd.DataFrame(
-                [
-                    ["Selected Entity", sel_entity],
-                    ["Selected Month", sel_month.strftime("%b-%Y")],
-                    ["AR Closing", inr(ar)],
-                    ["AP Closing", inr(ap)],
-                    ["Inventory Closing", inr(inv)],
-                    ["Cash Balance (month-end)", inr(cash_bal)],
-                    ["Max Inter-company % of Revenue", pct(max_ic_pct)],
-                    ["Min Cash Balance alert", inr(min_cash_alert)],
-                    ["Max Expense Ratio alert", pct(max_exp_ratio)],
-                    ["Min Net Margin alert", pct(min_net_margin)],
-                    ["Max CCC (Days) alert", f"{max_ccc_days:.0f}"],
-                ],
-                columns=["Input", "Value"],
-            )
-            st.dataframe(df_inputs, use_container_width=True, hide_index=True)
+    # Working capital status (simple rules)
+    wc_rag, _ = rag_from_threshold(ccc, green_max=max_ccc_days, higher_is_bad=True)
+    wc_text = "Working Capital Healthy" if wc_rag == "GREEN" else ("Working Capital Needs Attention" if wc_rag == "RED" else "Working Capital Watchlist")
+    wc_bg = "#2f6f52" if wc_rag == "GREEN" else ("#8a3a10" if wc_rag == "RED" else "#806000")
 
-        # Transactions
-        with sub[1]:
-            st.markdown("**Purpose:** Clean ledger table that drives everything.")
-            dfm = k["df_month"].copy()
-            show_cols = ["Date", "Entity", "AccountType", "Category", "Counterparty", "Amount", "Amount_norm", "CashFlag", "IntercompanyFlag"]
-            dfm = dfm[show_cols].sort_values("Date")
-            dfm = dfm.rename(columns={"Amount_norm": "Amount (Sign Enforced)"})
-            st.dataframe(dfm, use_container_width=True, hide_index=True)
+    tile_cols = st.columns(5)
+    tile_cols[0].markdown(tile_html("Total Revenue", inr_compact(total_rev), "#163b73"), unsafe_allow_html=True)
+    tile_cols[1].markdown(tile_html("Total Expenses", inr_compact(total_exp), "#c05613"), unsafe_allow_html=True)
+    tile_cols[2].markdown(tile_html("Net Profit", inr_compact(net_profit), "#1f7a3a"), unsafe_allow_html=True)
+    tile_cols[3].markdown(tile_html("Cash Position", inr_compact(cash_pos), "#0f766e"), unsafe_allow_html=True)
+    tile_cols[4].markdown(tile_html(wc_text, "", wc_bg), unsafe_allow_html=True)
 
-        # P&L
-        with sub[2]:
-            st.markdown("**Purpose:** Monthly P&L auto-built from Transactions (SUMIFS-equivalent).")
-            pnl = monthly_pnl_table(tx, sel_entity)
-            if pnl.empty:
-                st.info("No data for this entity.")
-            else:
-                st.dataframe(pnl, use_container_width=True, hide_index=True)
+    st.markdown(
+        '<div class="formula-strip">Revenue — COGS — Operating Expenses — Interest &amp; Taxes = Net Profit</div>',
+        unsafe_allow_html=True,
+    )
 
-        # CashFlow
-        with sub[3]:
-            st.markdown("**Purpose:** Liquidity view + cash conversion cycle.")
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                card("DSO (AR Days)", "—" if np.isnan(dso) else f"{dso:.1f}")
-            with c2:
-                card("DPO (AP Days)", "—" if np.isnan(dpo) else f"{dpo:.1f}")
-            with c3:
-                card("DIO (Inv Days)", "—" if np.isnan(dio) else f"{dio:.1f}")
-            with c4:
-                card("CCC (Days)", "—" if np.isnan(ccc) else f"{ccc:.1f}")
+    # 3 panels top row
+    left, mid, right = st.columns([1.25, 1.25, 1.5])
 
-            st.markdown("**Operating Cash Flow (CashFlag = Cash)**")
-            st.write(inr(k["Operating Cash Flow"]))
-
-        # SisterConcerns
-        with sub[4]:
-            st.markdown("**Purpose:** Inter-company monitoring and flags.")
-            sc = sister_concerns_table(tx, sel_month)
-            if sc.empty:
-                st.info("No inter-company rows in selected month.")
-            else:
-                sc2 = sc.copy()
-                sc2["Inter-company In/Out"] = sc2["Inter-company In/Out"].apply(inr)
-                sc2["% of Revenue"] = sc2["% of Revenue"].apply(lambda x: pct(x, 1))
-                st.dataframe(sc2[["Entity", "Inter-company In/Out", "% of Revenue"]], use_container_width=True, hide_index=True)
-
-        # KPI Table
-        with sub[5]:
-            st.markdown("**Purpose:** KPI table with margins + working capital days.")
-            kpi_tbl = pd.DataFrame(
-                [
-                    ["Gross Margin %", pct(k["Gross Margin %"])],
-                    ["EBITDA Margin %", pct(k["EBITDA Margin %"])],
-                    ["Net Profit Margin %", pct(k["Net Margin %"])],
-                    ["DSO (AR Days)", "—" if np.isnan(dso) else f"{dso:.1f}"],
-                    ["DPO (AP Days)", "—" if np.isnan(dpo) else f"{dpo:.1f}"],
-                    ["DIO (Inv Days)", "—" if np.isnan(dio) else f"{dio:.1f}"],
-                    ["CCC (Days)", "—" if np.isnan(ccc) else f"{ccc:.1f}"],
-                ],
-                columns=["KPI", "Value"],
-            )
-            st.dataframe(kpi_tbl, use_container_width=True, hide_index=True)
-
-# -----------------------------------
-# GOVERNANCE (RAG + IMPROVEMENTS)
-# -----------------------------------
-with top_tabs[2]:
-    st.subheader("Governance Suggestions (RED / AMBER / GREEN)")
-
-    if not kpi_loaded:
-        st.warning("Upload KPI template to enable governance checks.")
-    else:
-        # Build checks
-        exp_ratio = k["Expense Ratio"]
-        net_margin = k["Net Margin %"]
-        ic_pct = k["Intercompany % of Revenue"]
-        cash_ok = cash_bal
-        ccc_days = ccc
-
-        rag_exp, why_exp = rag_from_threshold(exp_ratio, green_max=max_exp_ratio, higher_is_bad=True)
-        rag_ic, why_ic = rag_from_threshold(ic_pct, green_max=max_ic_pct, higher_is_bad=True)
-        rag_cash, why_cash = rag_from_threshold(cash_ok, green_min=min_cash_alert, higher_is_bad=False)
-        rag_nm, why_nm = rag_from_threshold(net_margin, green_min=min_net_margin, higher_is_bad=False)
-        rag_ccc, why_ccc = rag_from_threshold(ccc_days, green_max=max_ccc_days, higher_is_bad=True)
-
-        # Action recommendations (strict + practical)
-        actions = {
-            "Expense Ratio": {
-                "RED": "RED: Expense Ratio HIGH. Improve: reduce admin/overheads, renegotiate vendors, stop discretionary spend, re-check COGS leakage, category-wise caps.",
-                "AMBER": "AMBER: Expense Ratio near limit. Improve: lock budgets by category, approve PO limits, monthly variance review (Budget vs Actual).",
-                "GREEN": "GREEN: Expense Ratio under control.",
-            },
-            "Intercompany %": {
-                "RED": "RED: Inter-company % is HIGH. Improve: enforce IC caps, reconcile IC balances weekly, require approvals for SisterCo payments, align transfer pricing / MoU.",
-                "AMBER": "AMBER: Inter-company % near limit. Improve: monitor weekly, require justification & tagging for IC entries.",
-                "GREEN": "GREEN: Inter-company level acceptable (as per threshold).",
-            },
-            "Cash Balance": {
-                "RED": "RED: Cash Balance below minimum. Improve: accelerate collections (DSO), defer non-critical payments, renegotiate payment terms, short-term liquidity plan.",
-                "AMBER": "AMBER: Cash Balance barely above minimum. Improve: tighten cash forecasting, daily cash dashboard for top 10 inflows/outflows.",
-                "GREEN": "GREEN: Cash balance acceptable.",
-            },
-            "Net Margin": {
-                "RED": "RED: Net Margin below minimum. Improve: reprice services, reduce cost base, increase high-margin revenue mix, cut non-core Opex.",
-                "AMBER": "AMBER: Net Margin borderline. Improve: focus on fee realization, eliminate low-margin categories, improve utilization.",
-                "GREEN": "GREEN: Net margin healthy.",
-            },
-            "CCC (Days)": {
-                "RED": "RED: CCC too high. Improve: reduce AR days (collections), reduce inventory days (stock optimization), extend AP days (supplier terms).",
-                "AMBER": "AMBER: CCC near limit. Improve: weekly follow-up on receivables + vendor term review.",
-                "GREEN": "GREEN: CCC under control.",
-            },
-        }
-
-        rag_box(rag_exp, actions["Expense Ratio"][rag_exp] + f" (Current: {pct(exp_ratio)} | Limit: {pct(max_exp_ratio)})")
-        rag_box(rag_nm, actions["Net Margin"][rag_nm] + f" (Current: {pct(net_margin)} | Min: {pct(min_net_margin)})")
-        rag_box(rag_cash, actions["Cash Balance"][rag_cash] + f" (Current: {inr(cash_bal)} | Min: {inr(min_cash_alert)})")
-        rag_box(rag_ic, actions["Intercompany %"][rag_ic] + f" (Current: {pct(ic_pct)} | Max: {pct(max_ic_pct)})")
-        rag_box(rag_ccc, actions["CCC (Days)"][rag_ccc] + f" (Current: {'—' if np.isnan(ccc_days) else f'{ccc_days:.1f}'} | Max: {max_ccc_days:.0f})")
-
-        st.markdown("### Improvement Recommendations (Auto)")
-        recs = []
-
-        # Category-wise top costs (selected month)
-        dfm = k["df_month"].copy()
-        top_opex = (
-            dfm[dfm["AccountType"].str.upper().eq("OPEX")]
-            .groupby("Category")["Amount_norm"]
-            .sum()
-            .abs()
-            .sort_values(ascending=False)
-            .head(5)
-        )
-        if len(top_opex) > 0:
-            recs.append(f"Top Opex drivers (month): {', '.join([f'{cat} ({inr(val)})' for cat, val in top_opex.items()])}. Consider caps + approvals for top 2 categories.")
-
-        # Intercompany counterparties
-        ic = dfm[dfm["IntercompanyFlag"].str.upper().eq("YES")].copy()
-        top_ic = ic.groupby("Counterparty")["Amount_norm"].sum().abs().sort_values(ascending=False).head(5)
-        if len(top_ic) > 0:
-            recs.append(f"Top intercompany counterparties: {', '.join([f'{cp} ({inr(val)})' for cp, val in top_ic.items()])}. Add IC justification notes + monthly reconciliations.")
-
-        # Working capital flags
-        if not np.isnan(dso) and dso > 60:
-            recs.append("DSO is high. Do a receivables ageing review; set collection targets and escalation workflow.")
-        if not np.isnan(dio) and dio > 90:
-            recs.append("Inventory days high. Identify slow-moving items; tighten procurement and reorder points.")
-        if not np.isnan(dpo) and dpo < 30:
-            recs.append("DPO low. Negotiate vendor terms to reduce working capital pressure.")
-
-        if not recs:
-            recs = ["No major red flags detected from available data; keep monthly governance review cadence."]
-
-        for r in recs:
-            st.markdown(f"- {r}")
-
-# -----------------------------------
-# CONSOLIDATION
-# -----------------------------------
-with top_tabs[3]:
-    st.subheader("Consolidation Report (All Entities - Selected Month)")
-
-    if not kpi_loaded:
-        st.warning("Upload KPI template to enable consolidation.")
-    else:
-        eliminate_ic = st.toggle("Eliminate Intercompany in Consolidation (Recommended)", value=True)
-        cons = consolidate_month(tx, sel_month, eliminate_ic=eliminate_ic)
-
-        # Table
-        cons_tbl = pd.DataFrame(
-            [
-                ["Revenue", cons["Revenue"]],
-                ["COGS", cons["COGS"]],
-                ["Gross Profit", cons["Gross Profit"]],
-                ["Opex", cons["Opex"]],
-                ["EBITDA", cons["EBITDA"]],
-                ["Interest", cons["Interest"]],
-                ["Tax", cons["Tax"]],
-                ["Net Profit", cons["Net Profit"]],
-            ],
-            columns=["Metric", "Value"],
-        )
-        cons_tbl["Value"] = cons_tbl["Value"].apply(inr)
-        st.dataframe(cons_tbl, use_container_width=True, hide_index=True)
-
-        # Consolidated KPI cards
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            card("Consolidated Gross Margin", pct(cons["Gross Margin %"]))
-        with c2:
-            card("Consolidated EBITDA Margin", pct(cons["EBITDA Margin %"]))
-        with c3:
-            card("Consolidated Net Margin", pct(cons["Net Margin %"]))
-        with c4:
-            card("Consolidated Expense Ratio", pct(cons["Expense Ratio"]))
-
-        # Quick narrative
-        bullets = []
-        bullets.append(f"Consolidation basis: **{'IC eliminated' if eliminate_ic else 'IC included'}** for {sel_month.strftime('%b-%Y')}.")
-        if not np.isnan(cons["Expense Ratio"]) and cons["Expense Ratio"] > max_exp_ratio:
-            bullets.append("Expense Ratio breaches threshold at group level → prioritize cost controls and re-check COGS classification.")
-        if not np.isnan(cons["Net Margin %"]) and cons["Net Margin %"] < min_net_margin:
-            bullets.append("Net Margin below threshold → review pricing + fee realization + cost structure.")
-        narrative_block("Management Summary (Auto)", bullets)
-
-# -----------------------------------
-# KPI CHARTS + NARRATION (IMPROVED)
-# - NO "stupid" narration; structured, numeric, actionable
-# -----------------------------------
-with top_tabs[4]:
-    st.subheader("KPI Charts + Narration (Selected Entity)")
-
-    if not kpi_loaded:
-        st.warning("Upload KPI template to enable charts.")
-    else:
-        pnl = monthly_pnl_table(tx, sel_entity)
+    # -------- Revenue Analysis
+    with left:
+        st.markdown('<div class="panel"><div class="section-header">Revenue Analysis</div><div class="panel-body">', unsafe_allow_html=True)
+        pnl = monthly_pnl_table(tx, sel_entity, eliminate_ic=eliminate_ic)
         if pnl.empty:
-            st.info("No data for this entity.")
+            st.info("No revenue history found.")
         else:
-            # Bar charts (no confusing M scale; values shown above bars)
-            pnl_long = pnl.copy()
-            pnl_long["Month"] = pd.Categorical(pnl_long["Month"], categories=pnl["Month"].tolist(), ordered=True)
-
-            # Revenue vs Opex vs Net Profit bar
-            chart_df = pnl_long[["Month", "Revenue", "Opex", "Net Profit"]].copy()
-            chart_df["Opex"] = chart_df["Opex"].abs()
-            chart_melt = chart_df.melt(id_vars=["Month"], var_name="Metric", value_name="Value")
-
-            fig = plot_grouped_bar_with_labels(chart_melt, x="Month", y="Value", group="Metric",
-                                               title="Monthly: Revenue vs Opex vs Net Profit (Values on bars)",
-                                               yaxis_title="₹")
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=pnl["MonthLabel"], y=pnl["Revenue"], name="Revenue"))
+            fig.add_trace(go.Scatter(x=pnl["MonthLabel"], y=pnl["Revenue"].rolling(3, min_periods=1).mean(), name="Trend"))
+            fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=30), showlegend=True)
             st.plotly_chart(fig, use_container_width=True)
 
-            # Narration (structured)
-            # Current vs previous month
-            last_idx = pnl.shape[0] - 1
-            cur = pnl.iloc[last_idx].to_dict()
-            prev = pnl.iloc[last_idx - 1].to_dict() if last_idx - 1 >= 0 else None
+            # Growth + target achievement (simple)
+            if len(pnl) >= 2:
+                cur = pnl.iloc[-1]["Revenue"]
+                prev = pnl.iloc[-2]["Revenue"]
+                gr = safe_div(cur - prev, abs(prev)) if prev != 0 else np.nan
+                st.markdown(f"**Growth Rate:** {pct(gr)}")
+            else:
+                st.markdown("**Growth Rate:** —")
 
-            def delta(a, b):
-                if b is None or b == 0 or (isinstance(b, float) and np.isnan(b)):
-                    return np.nan
-                return (a - b) / abs(b)
+            # target achievement: assume target = 1.15 * previous month (demo style)
+            if len(pnl) >= 2:
+                target = pnl.iloc[-2]["Revenue"] * 1.15
+                ach = safe_div(pnl.iloc[-1]["Revenue"], target) if target else np.nan
+                st.markdown(f"**Target Achievement:** {pct(ach)}")
+            else:
+                st.markdown("**Target Achievement:** —")
 
-            bullets = []
-            bullets.append(f"Current month **{pnl.iloc[last_idx]['Month']}**: Revenue {inr(cur['Revenue'])}, Opex {inr(abs(cur['Opex']))}, Net Profit {inr(cur['Net Profit'])}.")
-            if prev:
-                bullets.append(
-                    f"MoM change: Revenue {pct(delta(cur['Revenue'], prev['Revenue']))}, "
-                    f"Opex {pct(delta(abs(cur['Opex']), abs(prev['Opex'])) )}, "
-                    f"Net Profit {pct(delta(cur['Net Profit'], prev['Net Profit']))}."
-                )
+        st.markdown("</div></div>", unsafe_allow_html=True)
 
-            # Cost driver narrative from selected month
-            dfm = k["df_month"].copy()
-            opex_by_cat = (
-                dfm[dfm["AccountType"].str.upper().eq("OPEX")]
-                .groupby("Category")["Amount_norm"].sum().abs().sort_values(ascending=False)
-            )
-            if len(opex_by_cat) > 0:
-                top2 = opex_by_cat.head(2)
-                bullets.append(
-                    "Top Opex drivers (selected month): "
-                    + ", ".join([f"**{c}** {inr(v)}" for c, v in top2.items()])
-                    + ". Action: cap/approve these categories first."
-                )
+    # -------- Cost & Expenditure
+    with mid:
+        st.markdown('<div class="panel"><div class="section-header">Cost & Expenditure</div><div class="panel-body">', unsafe_allow_html=True)
+        dfm = k["df_month"].copy()
 
-            # Governance headline
+        # Expense breakdown donut: use Opex categories (fallback: all non-revenue)
+        opex = dfm[dfm["AccountType"].str.upper().eq("OPEX")].copy()
+        if opex.empty:
+            st.info("No Opex breakdown for selected period.")
+        else:
+            g = opex.groupby("Category")["Amount_norm"].sum().abs().reset_index()
+            g = g.rename(columns={"Amount_norm": "Value"})
+            fig_d = px.pie(g, names="Category", values="Value", hole=0.65)
+            fig_d.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), showlegend=True)
+            st.plotly_chart(fig_d, use_container_width=True)
+
             exp_ratio = k["Expense Ratio"]
-            ic_pct = k["Intercompany % of Revenue"]
-            nm = k["Net Margin %"]
-            bullets.append(f"Governance snapshot: Expense Ratio {pct(exp_ratio)} vs limit {pct(max_exp_ratio)}; IC% {pct(ic_pct)} vs limit {pct(max_ic_pct)}; Net Margin {pct(nm)} vs min {pct(min_net_margin)}.")
+            st.markdown(f"✅ **Expense Ratio:** {pct(exp_ratio)}")
+            top2 = g.sort_values("Value", ascending=False).head(2)
+            st.markdown("✅ **Top Cost Drivers:** " + ", ".join([f"{r.Category} ({inr_compact(r.Value)})" for _, r in top2.iterrows()]))
 
-            narrative_block("Narration (Clean, numeric, actionable)", bullets)
+        # Budget vs Actual (benchmark): use scenario sliders
+        budget = total_exp * (1 + max(cost_increase, 0) / 100.0)  # simulated
+        actual = total_exp
+        bdf = pd.DataFrame({"Type": ["Budget", "Actual"], "Value": [budget, actual]})
+        fig_ba = px.bar(bdf, x="Type", y="Value", text="Value", title="Budget vs Actual (Benchmark)")
+        fig_ba.update_traces(texttemplate="%{text:,.0f}", textposition="outside", cliponaxis=False)
+        fig_ba.update_layout(height=280, margin=dict(l=10, r=10, t=40, b=10), showlegend=False)
+        st.plotly_chart(fig_ba, use_container_width=True)
 
-# -----------------------------------
-# SDE/SOE DASHBOARD
-# -----------------------------------
-with top_tabs[5]:
-    st.subheader("SDE/SOE Dashboard")
+        st.markdown("</div></div>", unsafe_allow_html=True)
 
-    if not sde_loaded:
-        st.warning("Upload SDE/SOE file to enable this section.")
-    else:
-        cd = sde_tables["CDOE"].copy()
-        comb = sde_tables["COMBINED"].copy()
+    # -------- Profitability Metrics
+    with right:
+        st.markdown('<div class="panel"><div class="section-header">Profitability Metrics</div><div class="panel-body">', unsafe_allow_html=True)
 
-        # Prefer CDOE sheet for Income/Expenditure/Surplus/Transfer (it has all columns clearly)
-        # Standardize column names
-        rename_map = {}
-        for c in cd.columns:
-            cl = c.lower()
-            if "enrollment" in cl:
-                rename_map[c] = "Enrollment"
-            elif cl == "income":
-                rename_map[c] = "Income"
-            elif "expenditure" in cl:
-                rename_map[c] = "Expenditure"
-            elif "surplus" in cl:
-                rename_map[c] = "Surplus"
-            elif "transferred" in cl or "transfer" in cl:
-                rename_map[c] = "Transfer_to_BVDU"
-        cd = cd.rename(columns=rename_map)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Gross Margin", pct(k["Gross Margin %"]), help="Gross Profit / Revenue")
+        m2.metric("EBITDA Margin", pct(k["EBITDA Margin %"]), help="EBITDA / Revenue")
+        m3.metric("Net Profit Margin", pct(k["Net Margin %"]), help="Net Profit / Revenue")
 
-        # Keep only needed
-        keep = ["Year", "Enrollment", "Income", "Expenditure", "Surplus", "Transfer_to_BVDU"]
-        for c in keep:
-            if c not in cd.columns:
-                cd[c] = np.nan
-        cd2 = cd[keep].copy()
-        cd2 = cd2.dropna(subset=["Year"])
-
-        st.markdown("### Year-wise Financial Status (CDOE)")
-        st.dataframe(cd2, use_container_width=True, hide_index=True)
-
-        # BAR charts with values above bars (NO confusing M axis)
-        # Income vs Expenditure
-        df_ie = cd2.melt(id_vars=["Year"], value_vars=["Income", "Expenditure"], var_name="Metric", value_name="Value")
-        fig_ie = plot_grouped_bar_with_labels(df_ie, x="Year", y="Value", group="Metric",
-                                              title="Income vs Expenditure (Year-wise)",
-                                              yaxis_title="₹")
-        st.plotly_chart(fig_ie, use_container_width=True)
-
-        # Surplus + Transfer
-        df_st = cd2.melt(id_vars=["Year"], value_vars=["Surplus", "Transfer_to_BVDU"], var_name="Metric", value_name="Value")
-        fig_st = plot_grouped_bar_with_labels(df_st, x="Year", y="Value", group="Metric",
-                                              title="Surplus & Transfer to BVDU (Year-wise)",
-                                              yaxis_title="₹")
-        st.plotly_chart(fig_st, use_container_width=True)
-
-        # Enrollment
-        fig_en = plot_bar_with_labels(cd2, x="Year", y="Enrollment", title="Enrollment (Year-wise)", yaxis_title="Students")
-        st.plotly_chart(fig_en, use_container_width=True)
-
-        # Narration (organized)
-        # compute ratios latest year
-        latest = cd2.dropna(subset=["Income"]).tail(1)
-        if not latest.empty:
-            r = latest.iloc[0]
-            exp_ratio = safe_div(r["Expenditure"], r["Income"])
-            surplus_margin = safe_div(r["Surplus"], r["Income"])
-            transfer_pct = safe_div(r["Transfer_to_BVDU"], r["Income"])
-
-            bullets = [
-                f"Latest year **{r['Year']}**: Income {inr(r['Income'])}, Expenditure {inr(r['Expenditure'])}, Surplus {inr(r['Surplus'])}.",
-                f"Expense Ratio = {pct(exp_ratio)}; Surplus Margin = {pct(surplus_margin)}; Transfer % of Income = {pct(transfer_pct)}.",
-                "Use the governance tab to see strict RED/AMBER/GREEN flags with action steps.",
-            ]
-            narrative_block("Narration (SDE/SOE/CDOE)", bullets)
-
-# -----------------------------------
-# SDE/SOE GOVERNANCE + NOTES
-# -----------------------------------
-with top_tabs[6]:
-    st.subheader("SDE/SOE Governance Suggestions + Notes / Improvements")
-
-    if not sde_loaded:
-        st.warning("Upload SDE/SOE file to enable this section.")
-    else:
-        # Thresholds (reuse KPI sidebar values if you want separate; here we keep separate defaults)
-        with st.sidebar:
-            st.divider()
-            st.subheader("SDE/SOE Thresholds")
-            sde_max_exp_ratio = st.number_input("SDE/SOE Max Expense Ratio", min_value=0.0, max_value=2.0, value=0.75, step=0.01, format="%.2f")
-            sde_min_surplus_margin = st.number_input("SDE/SOE Min Surplus Margin", min_value=-1.0, max_value=1.0, value=0.10, step=0.01, format="%.2f")
-            sde_max_transfer_pct = st.number_input("SDE/SOE Max Transfer % of Income", min_value=0.0, max_value=1.0, value=0.35, step=0.01, format="%.2f")
-
-        cd = sde_tables["CDOE"].copy()
-        # same standardization as earlier
-        rename_map = {}
-        for c in cd.columns:
-            cl = c.lower()
-            if "enrollment" in cl:
-                rename_map[c] = "Enrollment"
-            elif cl == "income":
-                rename_map[c] = "Income"
-            elif "expenditure" in cl:
-                rename_map[c] = "Expenditure"
-            elif "surplus" in cl:
-                rename_map[c] = "Surplus"
-            elif "transferred" in cl or "transfer" in cl:
-                rename_map[c] = "Transfer_to_BVDU"
-        cd = cd.rename(columns=rename_map)
-        keep = ["Year", "Enrollment", "Income", "Expenditure", "Surplus", "Transfer_to_BVDU"]
-        for c in keep:
-            if c not in cd.columns:
-                cd[c] = np.nan
-        cd2 = cd[keep].dropna(subset=["Year"]).copy()
-
-        latest = cd2.dropna(subset=["Income"]).tail(1)
-        if latest.empty:
-            st.info("No usable Income/Expenditure data found for governance checks.")
+        pnl = monthly_pnl_table(tx, sel_entity, eliminate_ic=eliminate_ic)
+        if pnl.empty:
+            st.info("No profit trend data.")
         else:
-            r = latest.iloc[0]
-            exp_ratio = safe_div(r["Expenditure"], r["Income"])
-            surplus_margin = safe_div(r["Surplus"], r["Income"])
-            transfer_pct = safe_div(r["Transfer_to_BVDU"], r["Income"])
+            fig_np = go.Figure()
+            fig_np.add_trace(go.Scatter(x=pnl["MonthLabel"], y=pnl["Net Profit"], mode="lines+markers", name="Net Profit"))
+            fig_np.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=30), showlegend=False)
+            st.plotly_chart(fig_np, use_container_width=True)
 
-            rag_exp, _ = rag_from_threshold(exp_ratio, green_max=sde_max_exp_ratio, higher_is_bad=True)
-            rag_sm, _ = rag_from_threshold(surplus_margin, green_min=sde_min_surplus_margin, higher_is_bad=False)
-            rag_tr, _ = rag_from_threshold(transfer_pct, green_max=sde_max_transfer_pct, higher_is_bad=True)
-
-            rag_box(rag_exp, f"{rag_exp}: Expense Ratio {pct(exp_ratio)} (Limit {pct(sde_max_exp_ratio)}). Improve: tighten overheads, vendor renegotiation, discretionary controls.")
-            rag_box(rag_sm, f"{rag_sm}: Surplus Margin {pct(surplus_margin)} (Min {pct(sde_min_surplus_margin)}). Improve: fee realization, optimize cost per student, reduce leakage.")
-            rag_box(rag_tr, f"{rag_tr}: Transfer to BVDU {pct(transfer_pct)} of Income (Max {pct(sde_max_transfer_pct)}). Improve: justify transfer basis, link to performance, document governance approval.")
-
-            st.markdown("### Notes / Improvements (Auto)")
-            notes = []
-            if rag_exp == "RED":
-                notes.append("Immediate: prepare category-wise expense reduction plan; identify top 3 cost heads and set monthly caps.")
-            if rag_sm in ("RED", "AMBER"):
-                notes.append("Improve surplus: revise pricing / fee realization, raise enrollment quality/volume, reduce cost per student.")
-            if rag_tr in ("RED", "AMBER"):
-                notes.append("Strengthen governance: add transfer approval matrix + monthly transfer reconciliation note.")
-            if not notes:
-                notes.append("Governance looks stable for latest year, continue quarterly review and documentation.")
-            for n in notes:
-                st.markdown(f"- {n}")
-
-# -----------------------------------
-# DATA TABLES (BOTH FILES)
-# -----------------------------------
-with top_tabs[7]:
-    st.subheader("Data Tables (Both Files)")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("### KPI Template – Transactions (Sample)")
-        if not kpi_loaded:
-            st.info("KPI template not loaded.")
+        # Break-even quick status (FIXED: no inline-if syntax error)
+        if net_profit >= 0:
+            st.success("Operating above break-even for selected period.")
         else:
-            st.dataframe(tx.head(200), use_container_width=True, hide_index=True)
+            st.warning("Below break-even for selected period. Focus on cost + pricing actions.")
 
-    with c2:
-        st.markdown("### SDE/SOE – CDOE Table (Sample)")
-        if not sde_loaded:
-            st.info("SDE/SOE file not loaded.")
+        st.markdown("</div></div>", unsafe_allow_html=True)
+
+    # Bottom row: Cash Flow & Liquidity + Sister Concerns + Risk/Scenario
+    b1, b2, b3 = st.columns([1.25, 1.25, 1.5])
+
+    # Cash Flow & Liquidity
+    with b1:
+        st.markdown('<div class="panel"><div class="section-header">Cash Flow & Liquidity</div><div class="panel-body">', unsafe_allow_html=True)
+        st.metric("Operating Cash Flow", inr_full(k["Operating Cash Flow"]))
+        st.metric("AR Days (DSO)", "—" if np.isnan(dso) else f"{dso:.0f}")
+        st.metric("AP Days (DPO)", "—" if np.isnan(dpo) else f"{dpo:.0f}")
+        st.metric("Cash Balance", inr_full(cash_bal))
+
+        # mini bars for AR/AP days
+        mini = pd.DataFrame({"Metric": ["AR Days", "AP Days"], "Days": [0 if np.isnan(dso) else dso, 0 if np.isnan(dpo) else dpo]})
+        fig_m = px.bar(mini, x="Metric", y="Days", text="Days")
+        fig_m.update_traces(textposition="outside")
+        fig_m.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
+        st.plotly_chart(fig_m, use_container_width=True)
+
+        st.markdown("</div></div>", unsafe_allow_html=True)
+
+    # Sister Concerns Overview
+    with b2:
+        st.markdown('<div class="panel"><div class="section-header">Sister Concerns Overview</div><div class="panel-body">', unsafe_allow_html=True)
+        dfm = k["df_month"].copy()
+        ic = dfm[dfm["IntercompanyFlag"].str.upper().eq("YES")].copy()
+        if ic.empty:
+            st.info("No inter-company transactions for this period.")
         else:
-            st.dataframe(sde_tables["CDOE"].head(200), use_container_width=True, hide_index=True)
+            g = ic.groupby("Entity")["Amount_norm"].sum().reset_index()
+            g["Inter-Transfers"] = g["Amount_norm"].apply(inr_full)
+            g = g[["Entity", "Inter-Transfers"]]
+            st.dataframe(g, use_container_width=True, hide_index=True)
+            st.caption("Tip: switch to Consolidated + Eliminate IC to show true group performance.")
+        st.markdown("</div></div>", unsafe_allow_html=True)
 
-# -----------------------------------
-# TOOLS (CREATE TEMPLATE)
-# -----------------------------------
-with top_tabs[8]:
-    st.subheader("Tools")
-    st.markdown("### 1) Auto-create the starter Excel template (exact sheets + columns)")
+    # Risk & Scenario Analysis
+    with b3:
+        st.markdown('<div class="panel"><div class="section-header">Risk & Scenario Analysis</div><div class="panel-body">', unsafe_allow_html=True)
 
-    save_dir = st.text_input("Save folder (Windows example: D:\\AJ_Budget Analysis)", value=r"D:\AJ_Budget Analysis")
-    file_name = st.text_input("Template file name", value="KPI_Template_AutoCreated.xlsx")
+        # Scenario impact on Net Profit (simple what-if)
+        rev2 = total_rev * (1 + revenue_shock / 100.0)
+        exp2 = total_exp * (1 + cost_increase / 100.0)
+        np2 = rev2 - exp2  # simplified for scenario narration
 
-    if st.button("Create Excel Template Now"):
-        wb = create_blank_kpi_template_xlsx()
-
-        # Save into memory for download
-        import io
-        bio = io.BytesIO()
-        wb.save(bio)
-        bio.seek(0)
-
-        # Try saving to disk path (best effort)
-        saved_path = None
-        try:
-            if save_dir and os.path.isdir(save_dir):
-                saved_path = os.path.join(save_dir, file_name)
-                wb.save(saved_path)
-        except Exception:
-            saved_path = None
-
-        st.success("Template created.")
-        if saved_path:
-            st.info(f"Saved to: {saved_path}")
-
-        st.download_button(
-            "Download Template",
-            data=bio.getvalue(),
-            file_name=file_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        s_df = pd.DataFrame(
+            {
+                "Scenario": ["Base", "What-if"],
+                "Revenue": [total_rev, rev2],
+                "Expenses": [total_exp, exp2],
+                "Net Profit": [net_profit, np2],
+            }
         )
+        fig_s = px.bar(
+            s_df.melt(id_vars=["Scenario"], value_vars=["Revenue", "Expenses", "Net Profit"]),
+            x="Scenario",
+            y="value",
+            color="variable",
+            barmode="group",
+            text="value",
+        )
+        fig_s.update_traces(texttemplate="%{text:,.0f}", textposition="outside", cliponaxis=False)
+        fig_s.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), legend_title_text="")
+        st.plotly_chart(fig_s, use_container_width=True)
 
-    st.markdown("---")
-    st.markdown("### 2) Quick sanity checks (why amounts looked wrong earlier)")
-    st.markdown(
-        """
-        **Common causes**
-        - Revenue entered as negative (we now force Revenue to positive).
-        - Costs entered positive (we now force COGS/Opex/Interest/Tax to negative).
-        - Month filter mismatch (we use Date → MonthStart/MonthEnd).
-        - Truncated KPI cards (we now format full ₹ values with commas, no '...').
-        """
+        runway_months = np.nan
+        if cash_bal and (exp2 / 12) > 0:
+            runway_months = cash_bal / (exp2 / 12)
+
+        st.markdown(f"**Break-even shift:** {inr_compact(np2 - net_profit)} impact vs base")
+        st.markdown(f"**Cash runway:** {'—' if np.isnan(runway_months) else f'{runway_months:.1f} months'}")
+
+        st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+# =============================================================================
+# DETAILED VIEW (Operations)
+# =============================================================================
+def render_detailed_view():
+    tabs = st.tabs(
+        [
+            "🏠 Home / Model Map",
+            "📊 KPI Template Dashboard",
+            "🏛 Governance (RAG + Improvements)",
+            "🧾 Consolidation (Group View)",
+            "📈 KPI Charts + Narration",
+            "🎓 SDE/SOE Dashboard",
+        ]
     )
+
+    # Home / model map
+    with tabs[0]:
+        st.subheader("Overview / Model Map")
+        shown = False
+        for p in MODEL_MAP_CANDIDATES:
+            if p.exists():
+                st.image(str(p), use_container_width=True)
+                shown = True
+                break
+        if not shown:
+            st.info("Add model map image to ./assets/model_map.png (or overview.png) and redeploy.")
+
+        c1, c2 = st.columns(2)
+        c1.metric("KPI Template Loaded", "YES" if kpi_loaded else "NO")
+        c2.metric("SDE/SOE Loaded", "YES" if sde_loaded else "NO")
+
+    # KPI Template dashboard (table-first)
+    with tabs[1]:
+        st.subheader("KPI Template Dashboard (Ledger-driven)")
+        if not kpi_loaded or k is None:
+            st.warning("Upload KPI template file to enable this section.")
+        else:
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
+            c1.metric("Total Revenue", inr_full(k["Revenue"]))
+            c2.metric("COGS", inr_full(k["COGS"]))
+            c3.metric("Opex", inr_full(k["Opex"]))
+            c4.metric("Net Profit", inr_full(k["Net Profit"]))
+            c5.metric("Expense Ratio", pct(k["Expense Ratio"]))
+            c6.metric("Inter-company %", pct(k["Intercompany % of Revenue"]))
+
+            st.caption("Sign convention enforced: Revenue (+); Costs/Interest/Tax negative; Profit is direct sum.")
+
+            sub = st.tabs(["Transactions", "P&L (Monthly)", "Working Capital", "Raw KPI Table"])
+            with sub[0]:
+                dfm = k["df_month"].copy().sort_values("Date")
+                st.dataframe(dfm, use_container_width=True, hide_index=True)
+
+            with sub[1]:
+                pnl = monthly_pnl_table(tx, sel_entity, eliminate_ic=eliminate_ic)
+                if pnl.empty:
+                    st.info("No monthly history available.")
+                else:
+                    show = pnl[["MonthLabel", "Revenue", "COGS", "Opex", "Net Profit"]].copy()
+                    for col in ["Revenue", "COGS", "Opex", "Net Profit"]:
+                        show[col] = show[col].apply(inr_full)
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+
+            with sub[2]:
+                st.metric("DSO (AR Days)", "—" if np.isnan(dso) else f"{dso:.1f}")
+                st.metric("DPO (AP Days)", "—" if np.isnan(dpo) else f"{dpo:.1f}")
+                st.metric("DIO (Inv Days)", "—" if np.isnan(dio) else f"{dio:.1f}")
+                st.metric("CCC (Days)", "—" if np.isnan(ccc) else f"{ccc:.1f}")
+
+            with sub[3]:
+                t = pd.DataFrame(
+                    [
+                        ("Gross Margin %", pct(k["Gross Margin %"])),
+                        ("EBITDA Margin %", pct(k["EBITDA Margin %"])),
+                        ("Net Margin %", pct(k["Net Margin %"])),
+                        ("Expense Ratio", pct(k["Expense Ratio"])),
+                        ("IC % of Revenue", pct(k["Intercompany % of Revenue"])),
+                    ],
+                    columns=["KPI", "Value"],
+                )
+                st.dataframe(t, use_container_width=True, hide_index=True)
+
+    # Governance
+    with tabs[2]:
+        st.subheader("Governance (RAG + Actions)")
+        if not kpi_loaded or k is None:
+            st.warning("Upload KPI template to enable governance checks.")
+        else:
+            exp_ratio = k["Expense Ratio"]
+            net_margin = k["Net Margin %"]
+            ic_pct = k["Intercompany % of Revenue"]
+
+            rag_exp, _ = rag_from_threshold(exp_ratio, green_max=max_exp_ratio, higher_is_bad=True)
+            rag_ic, _ = rag_from_threshold(ic_pct, green_max=max_ic_pct, higher_is_bad=True)
+            rag_cash, _ = rag_from_threshold(cash_bal, green_min=min_cash_alert, higher_is_bad=False)
+            rag_nm, _ = rag_from_threshold(net_margin, green_min=min_net_margin, higher_is_bad=False)
+            rag_ccc, _ = rag_from_threshold(ccc, green_max=max_ccc_days, higher_is_bad=True)
+
+            checks = [
+                ("Expense Ratio", pct(exp_ratio), f"Max {pct(max_exp_ratio)}", rag_exp),
+                ("Inter-company %", pct(ic_pct), f"Max {pct(max_ic_pct)}", rag_ic),
+                ("Cash Balance", inr_full(cash_bal), f"Min {inr_full(min_cash_alert)}", rag_cash),
+                ("Net Margin", pct(net_margin), f"Min {pct(min_net_margin)}", rag_nm),
+                ("CCC Days", "—" if np.isnan(ccc) else f"{ccc:.1f}", f"Max {max_ccc_days:.0f}", rag_ccc),
+            ]
+            df = pd.DataFrame(checks, columns=["Check", "Current", "Threshold", "RAG"])
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+            st.markdown("### Recommended actions")
+            if rag_exp in ("RED", "AMBER"):
+                st.markdown("- Tighten category-wise budgets, freeze discretionary spend, renegotiate vendors.")
+            if rag_nm in ("RED", "AMBER"):
+                st.markdown("- Improve pricing / fee realization; reduce low-margin activities; cut overheads.")
+            if rag_cash in ("RED", "AMBER"):
+                st.markdown("- Accelerate collections; defer non-critical payments; weekly cash forecast cadence.")
+            if rag_ic in ("RED", "AMBER"):
+                st.markdown("- Reconcile intercompany weekly; approvals for IC transfers; enforce IC caps.")
+            if rag_ccc in ("RED", "AMBER"):
+                st.markdown("- Reduce AR days, optimize inventory, negotiate longer AP terms.")
+
+    # Consolidation
+    with tabs[3]:
+        st.subheader("Consolidation (Group View)")
+        if not kpi_loaded:
+            st.warning("Upload KPI template to enable consolidation.")
+        else:
+            kc = compute_kpi_for_entity_month(tx, "__CONSOLIDATED__", sel_month, eliminate_ic=eliminate_ic)
+            st.markdown(f"**Month:** {sel_month.strftime('%b-%Y')} | **IC:** {'Eliminated' if eliminate_ic else 'Included'}")
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Revenue", inr_full(kc["Revenue"]))
+            c2.metric("Total Expenses", inr_full(abs(kc["COGS"]) + abs(kc["Opex"]) + abs(kc["Interest"]) + abs(kc["Tax"])))
+            c3.metric("Net Profit", inr_full(kc["Net Profit"]))
+            c4.metric("Expense Ratio", pct(kc["Expense Ratio"]))
+
+            pnl = monthly_pnl_table(tx, "__CONSOLIDATED__", eliminate_ic=eliminate_ic)
+            if not pnl.empty:
+                fig = px.line(pnl, x="MonthLabel", y=["Revenue", "Net Profit"])
+                fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=30))
+                st.plotly_chart(fig, use_container_width=True)
+
+    # KPI charts
+    with tabs[4]:
+        st.subheader("KPI Charts + Narration")
+        if not kpi_loaded:
+            st.warning("Upload KPI template to enable charts.")
+        else:
+            pnl = monthly_pnl_table(tx, sel_entity, eliminate_ic=eliminate_ic)
+            if pnl.empty:
+                st.info("No data for charts.")
+            else:
+                melt = pnl.melt(id_vars=["MonthLabel"], value_vars=["Revenue", "Opex", "Net Profit"], var_name="Metric", value_name="Value")
+                melt.loc[melt["Metric"].str.upper().eq("OPEX"), "Value"] = melt.loc[melt["Metric"].str.upper().eq("OPEX"), "Value"].abs()
+                fig = px.bar(melt, x="MonthLabel", y="Value", color="Metric", barmode="group", text="Value")
+                fig.update_traces(texttemplate="%{text:,.0f}", textposition="outside", cliponaxis=False)
+                fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=40), legend_title_text="")
+                st.plotly_chart(fig, use_container_width=True)
+
+    # SDE/SOE
+    with tabs[5]:
+        st.subheader("SDE/SOE Dashboard")
+        if not sde_loaded:
+            st.info("Upload SDE/SOE file to enable this section.")
+        else:
+            cd = sde_tables["CDOE"].copy()
+            rename_map = {}
+            for c in cd.columns:
+                cl = str(c).lower()
+                if "enrollment" in cl:
+                    rename_map[c] = "Enrollment"
+                elif cl == "income":
+                    rename_map[c] = "Income"
+                elif "expenditure" in cl:
+                    rename_map[c] = "Expenditure"
+                elif "surplus" in cl:
+                    rename_map[c] = "Surplus"
+                elif "transferred" in cl or "transfer" in cl:
+                    rename_map[c] = "Transfer_to_BVDU"
+            cd = cd.rename(columns=rename_map)
+
+            keep = ["Year", "Enrollment", "Income", "Expenditure", "Surplus", "Transfer_to_BVDU"]
+            for c in keep:
+                if c not in cd.columns:
+                    cd[c] = np.nan
+            cd2 = cd[keep].dropna(subset=["Year"]).copy()
+
+            st.dataframe(cd2, use_container_width=True, hide_index=True)
+
+            df_ie = cd2.melt(id_vars=["Year"], value_vars=["Income", "Expenditure"], var_name="Metric", value_name="Value")
+            fig_ie = px.bar(df_ie, x="Year", y="Value", color="Metric", barmode="group", text="Value")
+            fig_ie.update_traces(texttemplate="%{text:,.0f}", textposition="outside", cliponaxis=False)
+            fig_ie.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=30), legend_title_text="")
+            st.plotly_chart(fig_ie, use_container_width=True)
+
+
+# -----------------------------
+# ROUTING (two dashboards in one app)
+# -----------------------------
+if view_mode.startswith("Management"):
+    render_management_view()
+else:
+    render_detailed_view()
