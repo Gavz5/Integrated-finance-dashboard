@@ -3,6 +3,8 @@
 # AMFGIE | Adaptive Multi-Entity Financial Governance Intelligence Engine
 # WHITE / POWER BI-LIKE THEME + CLEAN DONUT + GAUGES + ANOMALY CARDS
 # + FORECAST & PREDICTIONS (Revenue Forecast + Expense Projection)
+# + Budget vs Actual (Benchmark)  ✅ ADDED BACK
+# + Excel Report Download with Timestamp ✅ ADDED
 #
 # Run:
 #   pip install streamlit pandas openpyxl plotly numpy
@@ -13,6 +15,8 @@ import os
 from calendar import monthrange
 from dataclasses import dataclass
 from typing import Dict, Optional
+from datetime import datetime
+from io import BytesIO
 
 import numpy as np
 import pandas as pd
@@ -310,7 +314,7 @@ def rag_badge_html(rag: str):
 
 
 # -----------------------------
-# PLOTLY LIGHT LAYOUT (NO "undefined")
+# PLOTLY LIGHT LAYOUT
 # -----------------------------
 def plotly_light_layout(fig, height=320, title_text=""):
     fig.update_layout(
@@ -320,10 +324,7 @@ def plotly_light_layout(fig, height=320, title_text=""):
         colorway=PBI_SEQ,
         font=dict(color=PBI["text"]),
         margin=dict(l=14, r=14, t=56, b=14),
-
-        # hard-fix title
         title=dict(text=title_text or "", x=0.0, xanchor="left", font=dict(color=PBI["text"])),
-
         legend=dict(
             bgcolor="rgba(255,255,255,0.85)",
             bordercolor="rgba(15,23,42,0.10)",
@@ -488,12 +489,6 @@ def next_months(start_month: pd.Timestamp, n: int) -> list:
     return months
 
 def simple_forecast(series: pd.Series, n: int = 6):
-    """
-    Very stable forecast:
-    - Use last 6 points
-    - Calculate avg growth rate (bounded)
-    - Apply forward
-    """
     y = pd.to_numeric(series, errors="coerce").fillna(0).values
     y = y[-6:] if len(y) >= 6 else y
     if len(y) < 2:
@@ -676,6 +671,71 @@ def monthly_series(tx, consolidated: bool, entity: Optional[str], eliminate_ic: 
     return out
 
 
+# -----------------------------
+# Excel Report Builder ✅
+# -----------------------------
+def build_excel_report_bytes(
+    context_text: str,
+    k: KPIResult,
+    monthly_df: pd.DataFrame,
+    df_rev_fc: pd.DataFrame,
+    df_exp_fc: pd.DataFrame,
+    thresholds: Dict[str, float],
+    anomalies: Dict[str, int],
+    tx_filtered: pd.DataFrame,
+    pnl_df: pd.DataFrame,
+) -> bytes:
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        # Summary
+        summary = pd.DataFrame(
+            [
+                ["Context", context_text],
+                ["Revenue", k.Revenue],
+                ["COGS", k.COGS],
+                ["Opex", k.Opex],
+                ["Interest", k.Interest],
+                ["Tax", k.Tax],
+                ["Gross Profit", k.GrossProfit],
+                ["EBITDA", k.EBITDA],
+                ["Net Profit", k.NetProfit],
+                ["OCF", k.OCF],
+                ["Expense Ratio", k.ExpenseRatio],
+                ["Gross Margin", k.GrossMargin],
+                ["EBITDA Margin", k.EBITDAMargin],
+                ["Net Margin", k.NetMargin],
+                ["Intercompany Sum", k.IntercompanySum],
+                ["Intercompany %", k.IntercompanyPct],
+            ],
+            columns=["Metric", "Value"],
+        )
+        summary.to_excel(writer, sheet_name="Summary", index=False)
+
+        # P&L
+        pnl_df.to_excel(writer, sheet_name="P&L", index=False)
+
+        # Monthly Series
+        if monthly_df is not None and not monthly_df.empty:
+            monthly_df.to_excel(writer, sheet_name="Monthly Series", index=False)
+
+        # Forecasts
+        if df_rev_fc is not None and not df_rev_fc.empty:
+            df_rev_fc.to_excel(writer, sheet_name="Revenue Forecast", index=False)
+        if df_exp_fc is not None and not df_exp_fc.empty:
+            df_exp_fc.to_excel(writer, sheet_name="Expense Projection", index=False)
+
+        # Thresholds
+        pd.DataFrame(list(thresholds.items()), columns=["Threshold", "Value"]).to_excel(writer, sheet_name="Thresholds", index=False)
+
+        # Anomalies
+        pd.DataFrame(list(anomalies.items()), columns=["Alert", "Cases"]).to_excel(writer, sheet_name="Anomalies", index=False)
+
+        # Filtered Transactions
+        tx_filtered.to_excel(writer, sheet_name="Transactions (Filtered)", index=False)
+
+    return bio.getvalue()
+
+
 # =========================================================
 # HERO
 # =========================================================
@@ -815,8 +875,8 @@ with tabs[0]:
                 unsafe_allow_html=True,
             )
 
-        context = f"{month_ts.strftime('%b-%Y')} | {'All Entities' if consolidated else entity}"
-        pill("Context", context, "Selected period / entity")
+        context_text = f"{month_ts.strftime('%b-%Y')} | {'All Entities' if consolidated else entity}"
+        pill("Context", context_text, "Selected period / entity")
         pill("Total Revenue", inr(k.Revenue), "Ledger-derived")
         pill("Total Expenses", inr(abs(k.COGS) + abs(k.Opex)), "COGS + Opex")
         pill("Net Profit", inr(k.NetProfit), f"Net Margin: {pct(k.NetMargin)}")
@@ -824,15 +884,16 @@ with tabs[0]:
         pill("Inter-company %", pct(k.IntercompanyPct), f"IC Sum: {inr(k.IntercompanySum)}")
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # OVERVIEW
+        # OVERVIEW (row 1)
         st.markdown("<div class='section-title'>OVERVIEW</div>", unsafe_allow_html=True)
         o1, o2, o3 = st.columns([1.2, 1.0, 1.0])
+
+        s = monthly_series(tx, consolidated, entity, eliminate_ic)
 
         with o1:
             st.markdown('<div class="panel">', unsafe_allow_html=True)
             st.markdown("<h3>Revenue vs Expenses</h3>", unsafe_allow_html=True)
 
-            s = monthly_series(tx, consolidated, entity, eliminate_ic)
             if s.empty:
                 st.markdown('<div class="muted">No monthly series available.</div>', unsafe_allow_html=True)
             else:
@@ -897,6 +958,60 @@ with tabs[0]:
             )
             st.markdown("</div>", unsafe_allow_html=True)
 
+        # ✅ ADDED: Budget vs Actual (Benchmark) — without removing anything
+        st.markdown("<div class='section-title'>BUDGET CONTROL</div>", unsafe_allow_html=True)
+        b1, b2 = st.columns([1.0, 1.0])
+
+        with b1:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.markdown("<h3>Budget vs Actual (Benchmark)</h3>", unsafe_allow_html=True)
+
+            actual_exp = float(abs(k.COGS) + abs(k.Opex))
+            budget_exp = float(s["Expenses"].tail(3).mean()) if (not s.empty and len(s) >= 3) else actual_exp
+
+            bench = pd.DataFrame(
+                {"Type": ["Budget", "Actual"], "Value": [budget_exp, actual_exp]}
+            )
+
+            fig_bench = px.bar(
+                bench,
+                x="Type",
+                y="Value",
+                text="Value",
+                color="Type",
+                color_discrete_map={"Budget": PBI["purple"], "Actual": PBI["magenta"]},
+            )
+            fig_bench.update_traces(texttemplate="%{text:,.0f}", textposition="outside", cliponaxis=False)
+            fig_bench = plotly_light_layout(fig_bench, height=320, title_text="")
+            st.plotly_chart(fig_bench, use_container_width=True)
+
+            st.markdown(
+                f"<div class='muted'>Budget = avg of last 3 months expenses (or current if history is short).</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with b2:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.markdown("<h3>Expense Mix (Top Opex Categories)</h3>", unsafe_allow_html=True)
+
+            dfm = k.df_month.copy()
+            opex_df = dfm[dfm["AccountType"].str.upper().eq("OPEX")].copy()
+            if opex_df.empty:
+                st.markdown("<div class='muted'>No Opex breakdown for selected period.</div>", unsafe_allow_html=True)
+            else:
+                g = opex_df.groupby("Category")["Amount_norm"].sum().abs().reset_index()
+                g = g.sort_values("Amount_norm", ascending=False).head(8)
+                fig_pie = px.pie(
+                    g, names="Category", values="Amount_norm", hole=0.62,
+                    color_discrete_sequence=PBI_SEQ
+                )
+                fig_pie.update_traces(textinfo="percent+label", textposition="inside")
+                fig_pie = plotly_light_layout(fig_pie, height=320, title_text="")
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
         # RISK INSIGHTS
         st.markdown("<div class='section-title'>RISK INSIGHTS</div>", unsafe_allow_html=True)
         r1, r2 = st.columns([1.2, 1.0])
@@ -938,7 +1053,6 @@ with tabs[0]:
             fraud_proxy += 20 * (1.0 if cash_rag == "RED" else 0.5 if cash_rag == "AMBER" else 0.0)
             fraud_proxy = float(np.clip(fraud_proxy, 0, 100))
 
-            s = monthly_series(tx, consolidated, entity, eliminate_ic)
             pr_proxy = 50.0
             if not s.empty and len(s) >= 4:
                 vol = float(np.nanstd(s["Net Profit"].tail(6)))
@@ -953,12 +1067,10 @@ with tabs[0]:
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # FORECAST & PREDICTIONS (ADDED BACK)
+        # FORECAST & PREDICTIONS (kept)
         st.markdown("<div class='section-title'>FORECAST & PREDICTIONS</div>", unsafe_allow_html=True)
 
         fL, fR = st.columns([1, 1])
-
-        s = monthly_series(tx, consolidated, entity, eliminate_ic)
         df_rev, df_exp = forecast_tables(s, n=6)
 
         with fL:
@@ -1000,6 +1112,68 @@ with tabs[0]:
                 st.plotly_chart(fig_ep, use_container_width=True)
 
             st.markdown("</div>", unsafe_allow_html=True)
+
+        # ✅ Excel Report Download with Timestamp (NO removal)
+        st.markdown("<div class='section-title'>REPORT DOWNLOAD</div>", unsafe_allow_html=True)
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.markdown("<h3>Download Excel Report</h3>", unsafe_allow_html=True)
+        st.markdown("<div class='muted'>Includes: Summary, P&L, Monthly Series, Forecasts, Thresholds, Anomalies, Filtered Transactions.</div>", unsafe_allow_html=True)
+
+        # Build P&L dataframe (for export)
+        dfm = k.df_month.copy()
+
+        def sum_type(df, t):
+            return df.loc[df["AccountType"].str.upper().eq(t.upper()), "Amount_norm"].sum()
+
+        pnl_df = pd.DataFrame(
+            [
+                ["Revenue", sum_type(dfm, "Revenue")],
+                ["COGS", sum_type(dfm, "COGS")],
+                ["Gross Profit", sum_type(dfm, "Revenue") + sum_type(dfm, "COGS")],
+                ["Opex", sum_type(dfm, "Opex")],
+                ["EBITDA", (sum_type(dfm, "Revenue") + sum_type(dfm, "COGS") + sum_type(dfm, "Opex"))],
+                ["Interest", sum_type(dfm, "Interest")],
+                ["Tax", sum_type(dfm, "Tax")],
+                ["Net Profit", k.NetProfit],
+            ],
+            columns=["Metric", "Value"],
+        )
+
+        thresholds = {
+            "Max Expense Ratio": max_exp_ratio,
+            "Min Net Margin": min_net_margin,
+            "Max Inter-company % of Revenue": max_ic_pct,
+            "Max CCC Days": max_ccc_days,
+            "Min Cash Alert (₹)": min_cash_alert,
+        }
+
+        # Filtered transactions used in the report
+        tx_filtered = dfm.copy()
+
+        report_bytes = build_excel_report_bytes(
+            context_text=context_text,
+            k=k,
+            monthly_df=s,
+            df_rev_fc=df_rev,
+            df_exp_fc=df_exp,
+            thresholds=thresholds,
+            anomalies=anomalies,
+            tx_filtered=tx_filtered,
+            pnl_df=pnl_df,
+        )
+
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        fname = f"AMFGIE_Report_{ts}.xlsx"
+
+        st.download_button(
+            label=f"⬇️ Download Excel Report ({ts})",
+            data=report_bytes,
+            file_name=fname,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================================================
 # TAB 2: INTEGRATED DASHBOARD
@@ -1059,8 +1233,9 @@ with tabs[1]:
                     ],
                     columns=["Metric", "Value"],
                 )
-                pnl["Value"] = pnl["Value"].apply(inr)
-                st.dataframe(pnl, use_container_width=True, hide_index=True)
+                pnl_show = pnl.copy()
+                pnl_show["Value"] = pnl_show["Value"].apply(inr)
+                st.dataframe(pnl_show, use_container_width=True, hide_index=True)
 
                 st.markdown("<div class='muted'>Raw ledger (audit trail)</div>", unsafe_allow_html=True)
                 show_cols = ["Date","Entity","AccountType","Category","Counterparty","Amount","Amount_norm","CashFlag","IntercompanyFlag"]
